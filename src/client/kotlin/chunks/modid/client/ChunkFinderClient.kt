@@ -63,8 +63,9 @@ object ChunkFinderClient : ClientModInitializer {
             scanStartedAt = tickCounter
             scanning = true
 
-            client.gui.getChat().addMessage(
-                Component.literal("[ChunkFinder] Scanning nearby chunks.")
+            player.displayClientMessage(
+                Component.literal("[ChunkFinder] Scanning nearby chunks."),
+                false
             )
         }
 
@@ -141,6 +142,8 @@ object ChunkFinderClient : ClientModInitializer {
         state.`is`(Blocks.BEE_NEST)
 
     private fun showResults(client: Minecraft) {
+        val player = client.player ?: return
+
         val activityFlags = results.values
             .filter { it.activityBlocks >= MIN_ACTIVITY_BLOCKS }
             .sortedByDescending { it.activityBlocks }
@@ -149,7 +152,7 @@ object ChunkFinderClient : ClientModInitializer {
             .filter { it.spawnerCount > 0 }
 
         fun message(text: String) {
-            client.gui.getChat().addMessage(Component.literal(text))
+            player.displayClientMessage(Component.literal(text), false)
         }
 
         message(
