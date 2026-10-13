@@ -5,7 +5,6 @@ import chunks.modid.ChunkFinder
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
 import net.minecraft.core.BlockPos
-import net.minecraft.network.chat.Component
 import net.minecraft.world.level.block.Blocks
 import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.client.Minecraft
@@ -20,9 +19,9 @@ object ChunkFinderClient : ClientModInitializer {
 
     private data class ChunkResult(
         val key: ChunkKey,
-        var activityBlocks: Int = 0,
-        var spawnerCount: Int = 0,
-        var sampleY: Int = 0
+        val activityBlocks: Int = 0,
+        val spawnerCount: Int = 0,
+        val sampleY: Int = 0
     )
 
     private var tickCounter = 0
@@ -63,9 +62,8 @@ object ChunkFinderClient : ClientModInitializer {
             scanStartedAt = tickCounter
             scanning = true
 
-            player.displayClientMessage(
-                Component.literal("[ChunkFinder] Scanning nearby chunks."),
-                false
+            ChunkFinder.logger.info(
+                "[ChunkFinder] Scanning nearby chunks."
             )
         }
 
@@ -80,7 +78,7 @@ object ChunkFinderClient : ClientModInitializer {
             chunkIndex >= chunkKeys.size &&
             tickCounter - scanStartedAt >= START_DELAY_TICKS
         ) {
-            showResults(client)
+            showResults()
             scanning = false
             nextScanTick = tickCounter + RESCAN_DELAY_TICKS
         }
@@ -141,9 +139,7 @@ object ChunkFinderClient : ClientModInitializer {
         state.`is`(Blocks.BEEHIVE) ||
         state.`is`(Blocks.BEE_NEST)
 
-    private fun showResults(client: Minecraft) {
-        val player = client.player ?: return
-
+    private fun showResults() {
         val activityFlags = results.values
             .filter { it.activityBlocks >= MIN_ACTIVITY_BLOCKS }
             .sortedByDescending { it.activityBlocks }
@@ -151,22 +147,18 @@ object ChunkFinderClient : ClientModInitializer {
         val spawnerFlags = results.values
             .filter { it.spawnerCount > 0 }
 
-        fun message(text: String) {
-            player.displayClientMessage(Component.literal(text), false)
-        }
-
-        message(
+        ChunkFinder.logger.info(
             "[ChunkFinder] Scan complete. Only client-visible block data was checked."
         )
 
         if (activityFlags.isEmpty()) {
-            message(
+            ChunkFinder.logger.info(
                 "[ChunkFinder] No activity-block clusters met the threshold " +
                 "($MIN_ACTIVITY_BLOCKS blocks per chunk)."
             )
         } else {
             activityFlags.take(12).forEach { result ->
-                message(
+                ChunkFinder.logger.info(
                     "[ChunkFinder] Candidate chunk ${result.key.x}, ${result.key.z}: " +
                     "${result.activityBlocks} selected blocks " +
                     "(sample Y=${result.sampleY}). This is a clue, not proof of player activity."
@@ -175,21 +167,20 @@ object ChunkFinderClient : ClientModInitializer {
         }
 
         if (spawnerFlags.isEmpty()) {
-            message(
+            ChunkFinder.logger.info(
                 "[ChunkFinder] No visible spawner blocks found in scanned chunks."
             )
         } else {
             spawnerFlags.forEach { result ->
-                message(
+                ChunkFinder.logger.info(
                     "[ChunkFinder] Spawner chunk ${result.key.x}, ${result.key.z}: " +
                     "${result.spawnerCount} spawner block(s)."
                 )
             }
         }
 
-        message(
-            "[ChunkFinder] This build reports candidates in chat. " +
-            "Purple world markers are not implemented yet."
+        ChunkFinder.logger.info(
+            "[ChunkFinder] Results are in the game log. Purple world markers are not implemented yet."
         )
     }
 }
