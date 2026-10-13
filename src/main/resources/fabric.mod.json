@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "chunk-finder",
+  "version": "${version}",
+  "name": "ActivityScanner",
+  "description": "Client-side activity-block and visible spawner scanner with delayed reports.",
+  "authors": [
+    "ActivityScanner"
+  ],
+  "contact": {
+    "homepage": "https://fabricmc.net/develop/template/"
+  },
+  "license": "CC0-1.0",
+  "icon": "assets/chunk-finder/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      {
+        "value": "chunks.modid.ChunkFinder",
+        "adapter": "kotlin"
+      }
+    ],
+    "client": [
+      {
+        "value": "chunks.modid.client.ChunkFinderClient",
+        "adapter": "kotlin"
+      }
+    ],
+    "fabric-datagen": [
+      {
+        "value": "chunks.modid.client.ChunkFinderDataGenerator",
+        "adapter": "kotlin"
+      }
+    ]
+  },
+  "mixins": [
+    "chunk-finder.mixins.json",
+    {
+      "config": "chunk-finder.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*",
+    "fabric-language-kotlin": "*"
+  }
+}
