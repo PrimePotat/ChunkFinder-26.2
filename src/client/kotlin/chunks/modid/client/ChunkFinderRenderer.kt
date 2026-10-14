@@ -1,12 +1,16 @@
-
 package chunks.modid.client
 
 import com.mojang.blaze3d.PrimitiveTopology
+import com.mojang.blaze3d.buffers.GpuBufferSlice
 import com.mojang.blaze3d.pipeline.RenderPipeline
+import com.mojang.blaze3d.pipeline.RenderTarget
 import com.mojang.blaze3d.systems.RenderPass
 import com.mojang.blaze3d.systems.RenderSystem
+import com.mojang.blaze3d.textures.GpuTextureView
 import com.mojang.blaze3d.vertex.PoseStack
 import com.mojang.blaze3d.vertex.VertexConsumer
+import com.mojang.blaze3d.vertex.VertexFormat
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionEvents
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents
@@ -14,27 +18,21 @@ import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.RenderPipelines
 import net.minecraft.client.renderer.StagedVertexBuffer
 import net.minecraft.client.renderer.rendertype.RenderType
-import net.minecraft.resources.ResourceLocation
+import net.minecraft.resources.Identifier
 import net.minecraft.world.phys.Vec3
+import org.joml.Matrix4f
+import org.joml.Matrix4fc
+import org.joml.Vector3f
+import org.joml.Vector4f
 import java.util.Optional
 import java.util.OptionalDouble
-import org.joml.Matrix4fc
 
 object ChunkFinderRenderer {
-    private data class Marker(
-        val x: Int,
-        val z: Int,
-        val y: Int
-    )
-
-    private var markers: List<Marker> = emptyList()
-    private var initialized = false
-
     private val pipeline: RenderPipeline =
         RenderPipelines.register(
             RenderPipeline.builder(RenderPipelines.DEBUG_FILLED_SNIPPET)
                 .withLocation(
-                    ResourceLocation.fromNamespaceAndPath(
+                    Identifier.fromNamespaceAndPath(
                         "chunk-finder",
                         "pipeline/chunk_markers"
                     )
@@ -43,42 +41,58 @@ object ChunkFinderRenderer {
                 .build()
         )
 
-    private val buffer = StagedVertexBuffer(
-        { "ChunkFinder Markers" },
-        RenderType.SMALL_BUFFER_SIZE
+    private val stagedBuffer =
+        StagedVertexBuffer(
+            { "ChunkFinder Buffer" },
+            RenderType.SMALL_BUFFER_SIZE
+        )
+
+    private val colorModulator = Vector4f(1f, 1f, 1f, 1f)
+    private val modelOffset = Vector3f()
+    private val textureMatrix = Matrix4f()
+
+    private data class Box(
+        val minX: Float,
+        val minY: Float,
+        val minZ: Float,
+        val maxX: Float,
+        val maxY: Float,
+        val maxZ: Float
     )
 
-    private val colorModulator =
-        org.joml.Vector4f(1f, 1f, 1f, 1f)
-    private val modelOffset = org.joml.Vector3f()
-    private val textureMatrix = org.joml.Matrix4f()
+    private var boxes: List<Box> = emptyList()
 
     fun init() {
-        if (initialized) return
-        initialized = true
+        LevelExtractionEvents.END_EXTRACTION.register(::extract)
+        LevelRenderEvents.AFTER_TRANSLUCENT_TERRAIN.register(::draw)
+    }
 
-        LevelExtractionEvents.END_EXTRACTION.register {
-            markers = ChunkFinderClient.getMarkers().map {
-                Marker(
-                    x = it.chunkX shl 4,
-                    z = it.chunkZ shl 4,
-                    y = it.sampleY
-                )
-            }
+    private fun extract(context: LevelExtractionContext) {
+        val client = Minecraft.getInstance()
+        val world = client.level
+        if (world == null) {
+            boxes = emptyList()
+            return
         }
 
-        LevelRenderEvents.AFTER_TRANSLUCENT_TERRAIN.register {
-            render(it)
+        boxes = ChunkFinderClient.getMarkers().map { marker ->
+            val x = marker.chunkX * 16
+            val z = marker.chunkZ * 16
+            Box(
+                x.toFloat(), world.minY.toFloat(), z.toFloat(),
+                (x + 16).toFloat(), world.maxY.toFloat(),
+                (z + 16).toFloat()
+            )
         }
     }
 
-    private fun render(context: LevelRenderContext) {
-        if (markers.isEmpty()) return
+    private fun draw(context: LevelRenderContext) {
+        if (boxes.isEmpty()) return
 
-        val format = pipeline.getVertexFormatBinding(0) ?: return
+        val format: VertexFormat =
+            pipeline.getVertexFormatBinding(0) ?: return
         val topology = pipeline.primitiveTopology
-
-        val draw = buffer.appendDraw(
+        val draw = stagedBuffer.appendDraw(
             format,
             topology,
             if (topology == PrimitiveTopology.QUADS)
@@ -86,104 +100,119 @@ object ChunkFinderRenderer {
             else null
         )
 
-        val poses = context.poseStack()
+        val matrices = context.poseStack()
         val camera: Vec3 = context.levelState().cameraRenderState.pos
 
-        poses.pushPose()
-        poses.translate(-camera.x, -camera.y, -camera.z)
+        matrices.pushPose()
+        matrices.translate(-camera.x, -camera.y, -camera.z)
 
-        val matrix = poses.last().pose()
-        val vertices = buffer.getVertexBuilder(draw)
-
-        for (marker in markers) {
-            val bottom = (marker.y - 2).toFloat()
-            val top = (marker.y + 6).toFloat()
-
-            box(
-                matrix, vertices,
-                marker.x.toFloat(), bottom, marker.z.toFloat(),
-                marker.x + 16f, top, marker.z + 16f
+        val consumer = stagedBuffer.getVertexBuilder(draw)
+        for (box in boxes) {
+            renderBox(
+                matrices.last().pose(),
+                consumer,
+                box,
+                0.65f, 0.15f, 0.95f, 0.22f
             )
         }
 
-        poses.popPose()
-        buffer.upload()
+        matrices.popPose()
 
-        val info = buffer.getExecuteInfo(draw)
+        stagedBuffer.upload()
+        val info = stagedBuffer.getExecuteInfo(draw)
         if (info != null) {
-            drawPass(info)
+            executeDraw(Minecraft.getInstance(), info)
+        }
+        stagedBuffer.endFrame()
+    }
+
+    private fun renderBox(
+        matrix: Matrix4fc,
+        out: VertexConsumer,
+        b: Box,
+        r: Float,
+        g: Float,
+        blue: Float,
+        a: Float
+    ) {
+        fun v(x: Float, y: Float, z: Float) {
+            out.addVertex(matrix, x, y, z).setColor(r, g, blue, a)
         }
 
-        buffer.endFrame()
+        // Front
+        v(b.minX, b.minY, b.maxZ)
+        v(b.maxX, b.minY, b.maxZ)
+        v(b.maxX, b.maxY, b.maxZ)
+        v(b.minX, b.maxY, b.maxZ)
+
+        // Back
+        v(b.maxX, b.minY, b.minZ)
+        v(b.minX, b.minY, b.minZ)
+        v(b.minX, b.maxY, b.minZ)
+        v(b.maxX, b.maxY, b.minZ)
+
+        // Left
+        v(b.minX, b.minY, b.minZ)
+        v(b.minX, b.minY, b.maxZ)
+        v(b.minX, b.maxY, b.maxZ)
+        v(b.minX, b.maxY, b.minZ)
+
+        // Right
+        v(b.maxX, b.minY, b.maxZ)
+        v(b.maxX, b.minY, b.minZ)
+        v(b.maxX, b.maxY, b.minZ)
+        v(b.maxX, b.maxY, b.maxZ)
+
+        // Top
+        v(b.minX, b.maxY, b.maxZ)
+        v(b.maxX, b.maxY, b.maxZ)
+        v(b.maxX, b.maxY, b.minZ)
+        v(b.minX, b.maxY, b.minZ)
+
+        // Bottom
+        v(b.minX, b.minY, b.minZ)
+        v(b.maxX, b.minY, b.minZ)
+        v(b.maxX, b.minY, b.maxZ)
+        v(b.minX, b.minY, b.maxZ)
     }
 
-    private fun box(
-        matrix: Matrix4fc,
-        out: VertexConsumer,
-        x1: Float, y1: Float, z1: Float,
-        x2: Float, y2: Float, z2: Float
+    private fun executeDraw(
+        client: Minecraft,
+        info: StagedVertexBuffer.ExecuteInfo
     ) {
-        face(out, matrix, x1,y1,z2, x2,y1,z2, x2,y2,z2, x1,y2,z2)
-        face(out, matrix, x2,y1,z1, x1,y1,z1, x1,y2,z1, x2,y2,z1)
-        face(out, matrix, x1,y1,z1, x1,y1,z2, x1,y2,z2, x1,y2,z1)
-        face(out, matrix, x2,y1,z2, x2,y1,z1, x2,y2,z1, x2,y2,z2)
-        face(out, matrix, x1,y2,z2, x2,y2,z2, x2,y2,z1, x1,y2,z1)
-        face(out, matrix, x1,y1,z1, x2,y1,z1, x2,y1,z2, x1,y1,z2)
-    }
-
-    private fun face(
-        out: VertexConsumer,
-        matrix: Matrix4fc,
-        x1: Float, y1: Float, z1: Float,
-        x2: Float, y2: Float, z2: Float,
-        x3: Float, y3: Float, z3: Float,
-        x4: Float, y4: Float, z4: Float
-    ) {
-        vertex(out, matrix, x1,y1,z1)
-        vertex(out, matrix, x2,y2,z2)
-        vertex(out, matrix, x3,y3,z3)
-        vertex(out, matrix, x4,y4,z4)
-    }
-
-    private fun vertex(
-        out: VertexConsumer,
-        matrix: Matrix4fc,
-        x: Float, y: Float, z: Float
-    ) {
-        out.addVertex(matrix, x, y, z)
-            .setColor(0.65f, 0.1f, 1f, 0.22f)
-    }
-
-    private fun drawPass(info: StagedVertexBuffer.ExecuteInfo) {
-        val client = Minecraft.getInstance()
-        val transforms = RenderSystem.getDynamicUniforms()
-            .writeTransform(
+        val transforms: GpuBufferSlice =
+            RenderSystem.getDynamicUniforms().writeTransform(
                 RenderSystem.getModelViewMatrixCopy(),
                 colorModulator,
                 modelOffset,
                 textureMatrix
             )
 
-        val target = client.gameRenderer.mainRenderTarget()
-        val color = target.getColorTextureView() ?: return
+        val target: RenderTarget = client.gameRenderer.mainRenderTarget()
+        val color: GpuTextureView = target.getColorTextureView() ?: return
 
-        val depth = target.getDepthTextureView()
+        val pass: RenderPass = RenderSystem.getDevice()
+            .createCommandEncoder()
+            .createRenderPass(
+                { "ChunkFinder markers" },
+                color,
+                Optional.empty(),
+                target.getDepthTextureView(),
+                OptionalDouble.empty()
+            )
 
-        RenderSystem.getDevice().createCommandEncoder().createRenderPass(
-            { "ChunkFinder purple markers" },
-            color,
-            Optional.empty(),
-            depth,
-            OptionalDouble.empty()
-        ).use { pass ->
-            pass.setPipeline(pipeline)
-            RenderSystem.bindDefaultUniforms(pass)
-            pass.setUniform("DynamicTransforms", transforms)
-            pass.setVertexBuffer(0, info.vertexBuffer().slice())
-            pass.setIndexBuffer(info.indexBuffer(), info.indexType())
-            pass.drawIndexed(
-                info.indexCount(), 1,
-                info.firstIndex(), info.baseVertex(), 0
+        pass.use {
+            it.setPipeline(pipeline)
+            RenderSystem.bindDefaultUniforms(it)
+            it.setUniform("DynamicTransforms", transforms)
+            it.setVertexBuffer(0, info.vertexBuffer().slice())
+            it.setIndexBuffer(info.indexBuffer(), info.indexType())
+            it.drawIndexed(
+                info.indexCount(),
+                1,
+                info.firstIndex(),
+                info.baseVertex(),
+                0
             )
         }
     }
