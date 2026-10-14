@@ -33,9 +33,12 @@ object ChunkFinderClient : ClientModInitializer {
     private val results = mutableMapOf<ChunkKey, ChunkResult>()
 
     override fun onInitializeClient() {
+        ChunkFinderRenderer.init()
+
         ClientTickEvents.END_CLIENT_TICK.register { client ->
             tick(client)
         }
+
         ChunkFinder.logger.info("ChunkFinder client initialized")
     }
 
