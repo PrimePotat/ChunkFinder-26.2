@@ -9,6 +9,14 @@ import net.minecraft.core.BlockPos
 import net.minecraft.world.level.block.Blocks
 import net.minecraft.world.level.block.state.BlockState
 
+data class ChunkMarker(
+    val chunkX: Int,
+    val chunkZ: Int,
+    val activityBlocks: Int,
+    val spawnerCount: Int,
+    val sampleY: Int
+)
+
 object ChunkFinderClient : ClientModInitializer {
     private const val RADIUS_CHUNKS = 3
     private const val START_DELAY_TICKS = 20 * 15
@@ -48,6 +56,26 @@ object ChunkFinderClient : ClientModInitializer {
     private var blockChecksThisTick = 0
 
     private val results = mutableMapOf<ChunkKey, ChunkResult>()
+
+    /**
+     * Returns candidate chunks for the renderer.
+     * These results are clues, not proof of player activity.
+     */
+    fun getMarkers(): List<ChunkMarker> =
+        results.values
+            .filter {
+                it.activityBlocks >= MIN_ACTIVITY_BLOCKS ||
+                    it.spawnerCount > 0
+            }
+            .map {
+                ChunkMarker(
+                    chunkX = it.key.x,
+                    chunkZ = it.key.z,
+                    activityBlocks = it.activityBlocks,
+                    spawnerCount = it.spawnerCount,
+                    sampleY = it.sampleY
+                )
+            }
 
     override fun onInitializeClient() {
         ChunkFinderRenderer.init()
@@ -97,15 +125,13 @@ object ChunkFinderClient : ClientModInitializer {
         ) {
             if (currentScan == null) {
                 val key = chunkKeys[chunkIndex]
-                val minY = level.minY
-                val maxY = level.maxY
 
                 currentScan = ChunkScan(
                     key = key,
-                    minY = minY,
-                    maxY = maxY,
+                    minY = level.minY,
+                    maxY = level.maxY,
                     x = key.x shl 4,
-                    y = minY,
+                    y = level.minY,
                     z = key.z shl 4
                 )
             }
@@ -143,11 +169,14 @@ object ChunkFinderClient : ClientModInitializer {
             while (scan.z < (scan.key.z shl 4) + 16) {
                 while (scan.y < scan.maxY) {
                     val pos = BlockPos(scan.x, scan.y, scan.z)
+
                     blockChecksThisTick++
                     scan.y++
 
                     if (!level.hasChunkAt(pos)) {
-                        if (blockChecksThisTick >= BLOCK_CHECKS_PER_TICK) return false
+                        if (blockChecksThisTick >= BLOCK_CHECKS_PER_TICK) {
+                            return false
+                        }
                         continue
                     }
 
@@ -162,7 +191,9 @@ object ChunkFinderClient : ClientModInitializer {
                         scan.spawners++
                     }
 
-                    if (blockChecksThisTick >= BLOCK_CHECKS_PER_TICK) return false
+                    if (blockChecksThisTick >= BLOCK_CHECKS_PER_TICK) {
+                        return false
+                    }
                 }
 
                 scan.y = scan.minY
@@ -178,16 +209,16 @@ object ChunkFinderClient : ClientModInitializer {
 
     private fun isActivityBlock(state: BlockState): Boolean =
         state.`is`(Blocks.AMETHYST_CLUSTER) ||
-        state.`is`(Blocks.BUDDING_AMETHYST) ||
-        state.`is`(Blocks.KELP) ||
-        state.`is`(Blocks.KELP_PLANT) ||
-        state.`is`(Blocks.CAVE_VINES) ||
-        state.`is`(Blocks.CAVE_VINES_PLANT) ||
-        state.`is`(Blocks.VINE) ||
-        state.`is`(Blocks.BAMBOO) ||
-        state.`is`(Blocks.COCOA) ||
-        state.`is`(Blocks.BEEHIVE) ||
-        state.`is`(Blocks.BEE_NEST)
+            state.`is`(Blocks.BUDDING_AMETHYST) ||
+            state.`is`(Blocks.KELP) ||
+            state.`is`(Blocks.KELP_PLANT) ||
+            state.`is`(Blocks.CAVE_VINES) ||
+            state.`is`(Blocks.CAVE_VINES_PLANT) ||
+            state.`is`(Blocks.VINE) ||
+            state.`is`(Blocks.BAMBOO) ||
+            state.`is`(Blocks.COCOA) ||
+            state.`is`(Blocks.BEEHIVE) ||
+            state.`is`(Blocks.BEE_NEST)
 
     private fun showResults() {
         val activityFlags = results.values
@@ -204,25 +235,27 @@ object ChunkFinderClient : ClientModInitializer {
         if (activityFlags.isEmpty()) {
             ChunkFinder.logger.info(
                 "[ChunkFinder] No activity-block clusters met the threshold " +
-                "($MIN_ACTIVITY_BLOCKS blocks per chunk)."
+                    "($MIN_ACTIVITY_BLOCKS blocks per chunk)."
             )
         } else {
             activityFlags.take(12).forEach { result ->
                 ChunkFinder.logger.info(
                     "[ChunkFinder] Candidate chunk ${result.key.x}, ${result.key.z}: " +
-                    "${result.activityBlocks} selected blocks " +
-                    "(sample Y=${result.sampleY}). This is a clue, not proof of player activity."
+                        "${result.activityBlocks} selected blocks " +
+                        "(sample Y=${result.sampleY}). This is a clue, not proof of player activity."
                 )
             }
         }
 
         if (spawnerFlags.isEmpty()) {
-            ChunkFinder.logger.info("[ChunkFinder] No visible spawner blocks found.")
+            ChunkFinder.logger.info(
+                "[ChunkFinder] No visible spawner blocks found."
+            )
         } else {
             spawnerFlags.forEach { result ->
                 ChunkFinder.logger.info(
                     "[ChunkFinder] Spawner chunk ${result.key.x}, ${result.key.z}: " +
-                    "${result.spawnerCount} spawner block(s)."
+                        "${result.spawnerCount} spawner block(s)."
                 )
             }
         }
