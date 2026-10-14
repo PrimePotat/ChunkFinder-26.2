@@ -4,16 +4,19 @@ package chunks.modid.client
 import chunks.modid.ChunkFinder
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
+import net.minecraft.client.Minecraft
 import net.minecraft.core.BlockPos
 import net.minecraft.world.level.block.Blocks
 import net.minecraft.world.level.block.state.BlockState
-import net.minecraft.client.Minecraft
 
 object ChunkFinderClient : ClientModInitializer {
-    private const val RADIUS_CHUNKS = 5
+    private const val RADIUS_CHUNKS = 3
     private const val START_DELAY_TICKS = 20 * 15
     private const val RESCAN_DELAY_TICKS = 20 * 60
     private const val MIN_ACTIVITY_BLOCKS = 12
+
+    // Limit block checks per tick to reduce sudden lag.
+    private const val BLOCK_CHECKS_PER_TICK = 4096
 
     private data class ChunkKey(val x: Int, val z: Int)
 
@@ -24,12 +27,26 @@ object ChunkFinderClient : ClientModInitializer {
         val sampleY: Int = 0
     )
 
+    private data class ChunkScan(
+        val key: ChunkKey,
+        val minY: Int,
+        val maxY: Int,
+        var x: Int,
+        var y: Int,
+        var z: Int,
+        var activity: Int = 0,
+        var spawners: Int = 0,
+        var sampleY: Int = minY
+    )
+
     private var tickCounter = 0
-    private var scanStartedAt = 0
     private var nextScanTick = START_DELAY_TICKS
     private var scanning = false
-    private var chunkIndex = 0
     private var chunkKeys: List<ChunkKey> = emptyList()
+    private var chunkIndex = 0
+    private var currentScan: ChunkScan? = null
+    private var blockChecksThisTick = 0
+
     private val results = mutableMapOf<ChunkKey, ChunkResult>()
 
     override fun onInitializeClient() {
@@ -39,7 +56,7 @@ object ChunkFinderClient : ClientModInitializer {
             tick(client)
         }
 
-        ChunkFinder.logger.info("ChunkFinder client initialized")
+        ChunkFinder.logger.info("[ChunkFinder] Client initialized.")
     }
 
     private fun tick(client: Minecraft) {
@@ -62,71 +79,101 @@ object ChunkFinderClient : ClientModInitializer {
 
             results.clear()
             chunkIndex = 0
-            scanStartedAt = tickCounter
+            currentScan = null
             scanning = true
 
             ChunkFinder.logger.info(
-                "[ChunkFinder] Scanning nearby chunks."
+                "[ChunkFinder] Starting a gradual scan of ${chunkKeys.size} chunks."
             )
         }
 
         if (!scanning) return
 
-        if (chunkIndex < chunkKeys.size) {
-            scanChunk(level, chunkKeys[chunkIndex])
-            chunkIndex++
+        blockChecksThisTick = 0
+
+        while (
+            blockChecksThisTick < BLOCK_CHECKS_PER_TICK &&
+            chunkIndex < chunkKeys.size
+        ) {
+            if (currentScan == null) {
+                val key = chunkKeys[chunkIndex]
+                val minY = level.minY
+                val maxY = level.maxY
+
+                currentScan = ChunkScan(
+                    key = key,
+                    minY = minY,
+                    maxY = maxY,
+                    x = key.x shl 4,
+                    y = minY,
+                    z = key.z shl 4
+                )
+            }
+
+            val scan = currentScan!!
+            val finished = scanChunkStep(level, scan)
+
+            if (finished) {
+                if (scan.activity > 0 || scan.spawners > 0) {
+                    results[scan.key] = ChunkResult(
+                        key = scan.key,
+                        activityBlocks = scan.activity,
+                        spawnerCount = scan.spawners,
+                        sampleY = scan.sampleY
+                    )
+                }
+
+                currentScan = null
+                chunkIndex++
+            }
         }
 
-        if (
-            chunkIndex >= chunkKeys.size &&
-            tickCounter - scanStartedAt >= START_DELAY_TICKS
-        ) {
+        if (chunkIndex >= chunkKeys.size && currentScan == null) {
             showResults()
             scanning = false
             nextScanTick = tickCounter + RESCAN_DELAY_TICKS
         }
     }
 
-    private fun scanChunk(
+    private fun scanChunkStep(
         level: net.minecraft.client.multiplayer.ClientLevel,
-        key: ChunkKey
-    ) {
-        val minY = level.minY
-        val maxY = level.maxY
+        scan: ChunkScan
+    ): Boolean {
+        while (scan.x < (scan.key.x shl 4) + 16) {
+            while (scan.z < (scan.key.z shl 4) + 16) {
+                while (scan.y < scan.maxY) {
+                    val pos = BlockPos(scan.x, scan.y, scan.z)
+                    blockChecksThisTick++
+                    scan.y++
 
-        var activity = 0
-        var spawners = 0
-        var sampleY = minY
-
-        for (x in (key.x shl 4)..((key.x shl 4) + 15)) {
-            for (z in (key.z shl 4)..((key.z shl 4) + 15)) {
-                for (y in minY until maxY) {
-                    val pos = BlockPos(x, y, z)
-
-                    if (!level.hasChunkAt(pos)) continue
+                    if (!level.hasChunkAt(pos)) {
+                        if (blockChecksThisTick >= BLOCK_CHECKS_PER_TICK) return false
+                        continue
+                    }
 
                     val state = level.getBlockState(pos)
 
                     if (isActivityBlock(state)) {
-                        activity++
-                        sampleY = y
+                        scan.activity++
+                        scan.sampleY = pos.y
                     }
 
                     if (state.`is`(Blocks.SPAWNER)) {
-                        spawners++
+                        scan.spawners++
                     }
+
+                    if (blockChecksThisTick >= BLOCK_CHECKS_PER_TICK) return false
                 }
+
+                scan.y = scan.minY
+                scan.z++
             }
+
+            scan.z = scan.key.z shl 4
+            scan.x++
         }
 
-        if (activity > 0 || spawners > 0) {
-            results[key] = ChunkResult(
-                key = key,
-                activityBlocks = activity,
-                spawnerCount = spawners,
-                sampleY = sampleY
-            )
-        }
+        return true
     }
 
     private fun isActivityBlock(state: BlockState): Boolean =
@@ -151,7 +198,7 @@ object ChunkFinderClient : ClientModInitializer {
             .filter { it.spawnerCount > 0 }
 
         ChunkFinder.logger.info(
-            "[ChunkFinder] Scan complete. Only client-visible block data was checked."
+            "[ChunkFinder] Scan complete. Checked client-visible block data."
         )
 
         if (activityFlags.isEmpty()) {
@@ -170,9 +217,7 @@ object ChunkFinderClient : ClientModInitializer {
         }
 
         if (spawnerFlags.isEmpty()) {
-            ChunkFinder.logger.info(
-                "[ChunkFinder] No visible spawner blocks found in scanned chunks."
-            )
+            ChunkFinder.logger.info("[ChunkFinder] No visible spawner blocks found.")
         } else {
             spawnerFlags.forEach { result ->
                 ChunkFinder.logger.info(
@@ -181,9 +226,5 @@ object ChunkFinderClient : ClientModInitializer {
                 )
             }
         }
-
-        ChunkFinder.logger.info(
-            "[ChunkFinder] Results are in the game log. Purple world markers are not implemented yet."
-        )
     }
 }
